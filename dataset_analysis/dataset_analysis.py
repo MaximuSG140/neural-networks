@@ -8,6 +8,72 @@ import pandas as pd
 import seaborn as sns
 from pandas import DataFrame
 
+def info(df: pd.DataFrame, sub_df: pd.DataFrame, target_name: str) -> float:
+    if df[target_name].nunique() == 0:
+        return 0
+    interval_count = 1 + int(math.log(df[target_name].nunique(), 2))
+    left_border = df[target_name].min()
+    right_border = df[target_name].max()
+    step = (right_border - left_border) / interval_count
+
+    vals_in_interval = [0] * interval_count
+    value_counts = sub_df[target_name].value_counts()
+    unq_vals = list(value_counts.index)
+    if step != 0:
+        for i in range(len(unq_vals)):
+            interval_index = int((unq_vals[i] - left_border) // step)
+            if interval_index == interval_count:
+                interval_index -= 1
+            vals_in_interval[interval_index] += value_counts[unq_vals[i]]
+
+    s = 0.0
+    for val in value_counts:
+        tmp = val / sub_df[target_name].count()
+        if tmp != 0:
+            s += tmp * math.log(tmp, 2)
+    return -s
+
+
+def info_a(df: pd.DataFrame, attr_name: str, target_name: str) -> float:
+    if df[attr_name].nunique() == 0:
+        return 0
+    interval_count = 1 + int(math.log(df[attr_name].nunique(), 2))
+    left_border = df[attr_name].min()
+    right_border = df[attr_name].max()
+    step = (right_border - left_border) / interval_count
+    left_borders = []
+    for i in range(interval_count):
+        left_borders.append(left_border + i * step)
+
+    s = 0.0
+    for border in left_borders:
+        sub_df = df.loc[((df[attr_name] >= border) & (df[attr_name] < border + step)) |
+                        (df[attr_name] == right_border)]
+        s += info(df, sub_df, target_name)
+    return s
+
+
+def split_info(df: pd.DataFrame, attr_name: str) -> float:
+    s = 0.0
+    for val in df[attr_name].value_counts():
+        tmp = val / df[attr_name].count()
+        s += tmp * math.log(tmp, 2)
+    return s
+
+
+def gain(df: pd.DataFrame, attr_name: str, target_name: str) -> float:
+    return info(df, df, target_name) - info_a(df, attr_name, target_name)
+
+
+def gain_ratio(df: pd.DataFrame, attr_name: str, target_name: str) -> float:
+    return gain(df, attr_name, target_name) / split_info(df, attr_name)
+
+def data_set_gain_ratio(df: pd.DataFrame, target_name: str, num_target_columns: int) -> pd.Series:
+    gain_ratio_list = []
+    for col_name in df.columns[0:-num_target_columns]:
+        gain_ratio_list.append(gain_ratio(df, col_name, target_name))
+    return pd.Series(gain_ratio_list, index=df.columns[0:-num_target_columns])
+
 PRINT_ALLOWED = True
 MAX_MISSES_PERCENTS = 45
 COLS = 1
@@ -96,75 +162,6 @@ def fill_blanks(df: DataFrame, df_stat: DataFrame, targets: List[str]) -> DataFr
                 df[col][i] = df_stat[col]['Median']
     return df
 
-
-# returns list like [a, b, c, d] with intervals [a, b], [b, c], [c, d]
-def get_sturges_intervals(minimum: float, maximum: float, count: int) -> list[float]:
-    ints_count = 1 + math.floor(math.log2(count))
-    if ints_count < 1 or maximum <= minimum:
-        return []
-    current = minimum
-    int_len = (maximum - minimum) / ints_count
-    ints = [minimum]
-    for i in range(ints_count):
-        current += int_len
-        ints.append(current)
-    ints[ints_count] = maximum
-    return ints
-
-
-def get_interval_id(ints: list[float], val: float):
-    ints_count = len(ints) - 1
-    for i in range(1, ints_count + 1):
-        if val <= ints[i]:
-            return i
-
-
-# calculates (H(y) - H(y|x)) / SplitInformation(y) ,
-# where x, y -- names of columns in the data frame
-def calc_information_gain_ratio(df: DataFrame, df_stat: DataFrame, y: str, x: str) -> float:
-    samples_count = len(df[x])
-    # calculating probabilities...
-    x_ints = get_sturges_intervals(df_stat[x]['Minimum'], df_stat[x]['Maximum'], samples_count)
-    # ex: [3276.0, 3360.5, 3445.0, 3529.5, 3614.0, 3698.5, 3783.0, 3867.5, 3952.0]
-    y_ints = get_sturges_intervals(df_stat[y]['Minimum'], df_stat[y]['Maximum'], samples_count)
-    ints_count = len(x_ints) - 1
-    p_x = {i: 0 for i in range(1, ints_count + 1)}
-    p_y = {i: 0 for i in range(1, ints_count + 1)}
-    for val in df[x].values:
-        p_x[get_interval_id(x_ints, val)] += 1
-    # ex: {1: 17, 2: 14, 3: 11, 4: 70, 5: 69, 6: 0, 7: 0, 8: 3}
-    for val in df[y].values:
-        p_y[get_interval_id(y_ints, val)] += 1
-    # scoring target entropy...
-    h_y = 0
-    for y_count in p_y:
-        current_p_y = y_count / samples_count
-        h_y -= current_p_y * math.log2(current_p_y)
-    # scoring conditional probabilities...
-    h_yx = 0
-    p_y_x = {i: {j: 0 for j in p_y.keys()} for i in p_x.keys()}
-    for row_num in df[x].keys():
-        x_int = get_interval_id(x_ints, df[x][row_num])
-        p_y_x[x_int][get_interval_id(y_ints, df[y][row_num])] += 1
-    for x_int in p_x.keys():
-        current_p_x = p_x[x_int] / samples_count
-        entropy = 0
-        for val in p_y_x[x_int].values():
-            if val == 0:
-                continue
-            current_p_y = val / samples_count
-            entropy -= current_p_y * math.log2(current_p_y)
-        h_yx += current_p_x * entropy
-    # calculating split information(y)
-    si = 0
-    for y_int in p_y.keys():
-        fraction = p_y[y_int] / samples_count
-        if fraction == 0:
-            continue
-        si -= fraction * math.log2(fraction)
-    return (h_y - h_yx) / si
-
-
 def combine_kgf(df: DataFrame) -> DataFrame:
     for row_num in df['КГФ.1'].keys():
         if not np.isnan(df['КГФ.1'][row_num]):
@@ -188,10 +185,8 @@ def remove_empty_target(df: DataFrame, targets: List[str]) -> DataFrame:
 
 
 def show_gain_ratio(df: DataFrame, df_stat: DataFrame, target: str, targets: list[str]):
-    df_igr = pd.DataFrame({
-        key: [calc_information_gain_ratio(df, df_stat, target, key)] for key in df.keys() if not targets.__contains__(key)
-    })
-    sns.barplot(df_igr, orient='horizontal') # Рсб, Рсб.1
+    df_igr = data_set_gain_ratio(df, target, len(targets)).to_frame()
+    df_igr.plot(kind = 'barh')
     plt.show()
 
 
@@ -220,10 +215,6 @@ def main():
     # Рзаб and Рзаб1 have almost the same correlations
     # Also Руст and Руст1
     # By IGR defined that Руст.1 > Руст, Рзаб.1 > Рзаб, Дебит воды > Дебит воды.1
-    target = 'КГФ'
-    obs_cols = ['Руст', 'Руст.1', 'Рзаб', 'Рзаб.1', 'Дебит воды', 'Дебит воды.1', 'Дебит газа', 'Дебит гааз', 'Pсб', 'Pсб.1']
-    for column in obs_cols:
-        print(calc_information_gain_ratio(df, df_stat, target, column))
     df = df.drop(['Рзаб', 'Руст', 'Дебит воды.1'], axis=COLS)
     df_stat = df_stat.filter(items=df)
 
